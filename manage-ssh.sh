@@ -234,7 +234,33 @@ process_sshd_config_d() {
     done
   fi
 }
-# 在 disable_password_authentication 函数中调用此函数
+# 验证 sshd 配置是否正确应用
+verify_sshd_config() {
+  cfg_file="$1"
+  
+  log "正在验证 sshd 配置..."
+  
+  # 使用 sshd -T 检查实际生效的配置
+  if command -v sshd >/dev/null 2>&1; then
+    actual_config=$(sshd -T)
+    
+    # 检查关键配置项
+    if echo "$actual_config" | grep -i "passwordauthentication yes" >/dev/null 2>&1; then
+      log "警告: PasswordAuthentication 仍为 yes，可能被 Match 块或其他配置文件覆盖"
+    fi
+    
+    if echo "$actual_config" | grep -i "permitrootlogin yes" >/dev/null 2>&1; then
+      log "警告: PermitRootLogin 仍为 yes，可能被 Match 块或其他配置文件覆盖"
+    fi
+    
+    if echo "$actual_config" | grep -i "kbdinteractiveauthentication yes" >/dev/null 2>&1; then
+      log "警告: KbdInteractiveAuthentication 仍为 yes，可能被 Match 块或其他配置文件覆盖"
+    fi
+  else
+    log "警告: 无法找到 sshd 命令，跳过配置验证"
+  fi
+}
+# 禁用密码登录（不改变 root 是否允许密码登录；由 enable_password_authentication 控制）
 disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
@@ -250,7 +276,9 @@ disable_password_authentication() {
   process_sshd_config_d
   
   # 验证配置是否正确应用
-  verify_sshd_config "$cfg_file"
+  if command -v verify_sshd_config >/dev/null 2>&1; then
+    verify_sshd_config "$cfg_file"
+  fi
   
   log "已禁用密码登录相关的所有认证方式"
 }
