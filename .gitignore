@@ -1,0 +1,11 @@
+# 通用
+*.bak
+*.swp
+.vscode/
+.vs/
+.github/
+.idea/
+.DS_Store
+
+# 备份目录
+/var/backups/
