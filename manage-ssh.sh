@@ -210,30 +210,6 @@ check_pubkey_enabled_or_keys_exist() {
   fi
   return 1
 }
-# 在脚本中添加处理配置目录的函数
-process_sshd_config_d() {
-  config_dir="/etc/ssh/sshd_config.d"
-  
-  if [ -d "$config_dir" ]; then
-    log "检查 $config_dir 目录中的配置文件..."
-    
-    # 查找并修改所有包含密码认证设置的文件
-    for file in "$config_dir"/*.conf; do
-      if [ -f "$file" ]; then
-        # 备份文件
-        backup_file "$file" >/dev/null
-        
-        # 修改配置
-        set_sshd_directive "$file" "PasswordAuthentication" "no"
-        set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
-        set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
-        set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
-        
-        log "已更新 $file 中的密码认证设置"
-      fi
-    done
-  fi
-}
 # 验证 sshd 配置是否正确应用
 verify_sshd_config() {
   cfg_file="$1"
@@ -260,7 +236,33 @@ verify_sshd_config() {
     log "警告: 无法找到 sshd 命令，跳过配置验证"
   fi
 }
-# 禁用密码登录（不改变 root 是否允许密码登录；由 enable_password_authentication 控制）
+
+# 处理 sshd_config.d 目录中的配置文件
+process_sshd_config_d() {
+  config_dir="/etc/ssh/sshd_config.d"
+  
+  if [ -d "$config_dir" ]; then
+    log "检查 $config_dir 目录中的配置文件..."
+    
+    # 查找并修改所有包含密码认证设置的文件
+    for file in "$config_dir"/*.conf; do
+      if [ -f "$file" ]; then
+        # 备份文件
+        backup_file "$file" >/dev/null
+        
+        # 修改配置
+        set_sshd_directive "$file" "PasswordAuthentication" "no"
+        set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
+        set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
+        set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
+        
+        log "已更新 $file 中的密码认证设置"
+      fi
+    done
+  fi
+}
+
+# 禁用密码登录
 disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
@@ -276,9 +278,8 @@ disable_password_authentication() {
   process_sshd_config_d
   
   # 验证配置是否正确应用
-  if command -v verify_sshd_config >/dev/null 2>&1; then
-    verify_sshd_config "$cfg_file"
-  fi
+  # 直接调用函数，不使用 command -v 检查，因为我们知道它存在
+  verify_sshd_config "$cfg_file"
   
   log "已禁用密码登录相关的所有认证方式"
 }
