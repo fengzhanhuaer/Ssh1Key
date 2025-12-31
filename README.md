@@ -13,9 +13,9 @@
 - ✅ 自动备份配置文件，确保安全
 - ✅ 支持多种 Linux 发行版
 
-## 从 GitHub 拉取脚本并执行
+## 在终端中执行脚本
 
-### 安全下载流程（推荐）
+### 方式一：分步执行（推荐，更安全）
 
 1. **下载脚本**
    ```bash
@@ -26,43 +26,38 @@
    wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh
    ```
 
-2. **查看脚本内容（重要）**
+2. **查看脚本内容（安全验证）**
    ```bash
    # 查看脚本内容，确保安全
    cat manage-ssh.sh
    
-   # 或使用更安全的方式检查脚本
+   # 或使用分页查看
    less manage-ssh.sh
    ```
 
-3. **赋予执行权限**
+3. **赋予执行权限并执行（进入交互式菜单）**
    ```bash
-   chmod +x manage-ssh.sh
+   chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
    ```
 
-4. **执行脚本**
-   ```bash
-   sudo ./manage-ssh.sh [命令] [参数]
-   ```
+### 方式二：单命令执行（便捷）
 
-### 一键执行（不推荐用于不可信来源）
+如果您信任脚本来源，可以使用以下单条命令完成下载、授权和执行（自动进入交互式菜单）：
 
 ```bash
-# 使用 curl 一键执行（不带参数，自动进入交互式菜单）
-curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash
+# 使用 curl 的单命令执行
+curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -o manage-ssh.sh && chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
 
-# 使用 wget 一键执行（不带参数，自动进入交互式菜单）
-wget -q -O - https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash
-
-# 使用 curl 带参数执行
-curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash -s -- [命令] [参数]
-
-# 使用 wget 带参数执行
-wget -q -O - https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash -s -- [命令] [参数]
-
-# 示例：一键设置 SSH 端口为 2222
-curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash -s -- set-port 2222
+# 使用 wget 的单命令执行
+wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -O manage-ssh.sh && chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
 ```
+
+**注意**：单命令执行会跳过手动查看脚本内容的步骤，建议仅对可信来源使用。
+
+## 交互式菜单操作
+
+执行脚本后，您会看到以下交互式菜单：
+
 
 ## 命令说明
 
