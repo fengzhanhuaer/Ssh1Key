@@ -115,56 +115,6 @@ set_sshd_directive() {
   fi
 }
 
-# 在全局段（first Match 之前）替换/追加指令，避免被后续 Match 覆盖
-set_global_sshd_directive() {
-  file="$1"
-  key="$2"
-  value="$3"
-
-  if [ ! -f "$file" ]; then
-    error_exit "配置文件 $file 不存在"
-  fi
-
-  head_tmp=$(mktemp)
-  tail_tmp=$(mktemp)
-
-  # 找到第一个 Match 行号（若无则 head 为整文件）
-  match_line=$(awk '/^Match[[:space:]]/ {print NR; exit}' "$file" 2>/dev/null || true)
-  if [ -z "$match_line" ]; then
-    head_end=$(wc -l <"$file" 2>/dev/null || echo 0)
-  else
-    head_end=$((match_line - 1))
-  fi
-
-  if [ "$head_end" -gt 0 ]; then
-    sed -n "1,${head_end}p" "$file" > "$head_tmp"
-    sed -n "$((head_end + 1)),\$p" "$file" > "$tail_tmp"
-  else
-    : >"$head_tmp"
-    cat "$file" > "$tail_tmp"
-  fi
-
-  # 在 head 中替换所有匹配项，否则追加
-  if grep -E "^[[:space:]]*#?[[:space:]]*$key[[:space:]]+" "$head_tmp" >/dev/null 2>&1; then
-    awk -v k="$key" -v v="$value" '
-      BEGIN{IGNORECASE=1}
-      /^[[:space:]]*#/ { print; next }
-      {
-        if(tolower($1)==tolower(k)){
-          print k " " v
-        } else {
-          print
-        }
-      }
-    ' "$head_tmp" > "${head_tmp}.new" && mv "${head_tmp}.new" "$head_tmp"
-  else
-    printf "\n%s %s\n" "$key" "$value" >>"$head_tmp"
-  fi
-
-  cat "$head_tmp" "$tail_tmp" >"${file}.tmp" && mv "${file}.tmp" "$file"
-  rm -f "$head_tmp" "$tail_tmp" 2>/dev/null || true
-}
-
 # 从 GitHub 获取用户公钥列表，输出到指定文件（out）
 fetch_github_keys() {
   user="$1"
@@ -198,7 +148,8 @@ fetch_github_keys() {
 enable_pubkey_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
-  set_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "AuthorizedKeysFile" ".ssh/authorized_keys .ssh/authorized_keys2"
   log "已启用 PubkeyAuthentication"
 }
 
@@ -217,27 +168,17 @@ check_pubkey_enabled_or_keys_exist() {
   return 1
 }
 
-# 更严格的禁用密码登录：在全局段写入，避免 Match 覆盖
+# 禁用密码登录（不改变 root 是否允许密码登录；由 enable_password_authentication 控制）
 disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
-
-  # 确保公钥认证可用
-  set_global_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
-
-  # 禁用所有常见的密码通道（Password + Challenge/keyboard-interactive）
-  set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
-  set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
-  # 不强制关闭 UsePAM，PAM 可能被用来启动其他服务；如需彻底禁 PAM 可启用下面一行（已注释）
-  # set_global_sshd_directive "$cfg_file" "UsePAM" "no"
-
-  # 限制认证方式为仅公钥（谨慎：若需要 OTP/PAM，请不要设置此项）
-  set_global_sshd_directive "$cfg_file" "AuthenticationMethods" "publickey"
-
-  # 建议允许 root 使用公钥但禁止 root 密码登录
-  set_global_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
-
-  log "已在全局段禁用 PasswordAuthentication 与 ChallengeResponseAuthentication，并将 AuthenticationMethods 限制为 publickey"
+  # 禁用所有密码相关的认证方式
+  set_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
+  set_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
+  set_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
+  set_sshd_directive "$cfg_file" "UsePAM" "no"
+  set_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
+  log "已禁用密码登录相关的所有认证方式"
 }
 
 # 启用密码登录（按要求：允许 root 密码登录）
@@ -246,9 +187,14 @@ enable_password_authentication() {
   backup_file "$cfg_file" >/dev/null
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "yes"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "yes"
-  # 若之前设置了 AuthenticationMethods 为 publickey，移除或恢复为 any
-  set_global_sshd_directive "$cfg_file" "AuthenticationMethods" "any"
-  log "已启用 PasswordAuthentication 并允许 root 基于密码登录"
+  set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "UsePAM" "yes"
+  
+  # 验证配置是否正确应用
+  verify_sshd_config "$cfg_file"
+  
+  log "已启用密码登录并允许 root 基于密码登录"
 }
 
 set_ssh_port() {
@@ -507,43 +453,13 @@ EOF
       5)
         enable_password_authentication "$cfg_sshd_config_path"
         safe_reload_sshd
-        ;;
-      0)
-        log "退出"
-        break
-        ;;
-      *)
-        log "无效选择: $choice"
-        ;;
-    esac
-  done
-}
+        ;
 
 main() {
   if [ "$#" -lt 1 ]; then
     interactive_menu
     exit 0
   fi
+}
 
-  cmd="$1"
-  case "$cmd" in
-    1)
-      gh_user=${2:-${SUDO_USER:-$(whoami)}}
-      user_home=${3:-/root}
-      tmp=$(mktemp)
-      if fetch_github_keys "$gh_user" "$tmp"; then
-        install_authorized_key "$tmp" "$user_home"
-        enable_pubkey_authentication "$cfg_sshd_config_path"
-        safe_reload_sshd
-        rm -f "$tmp" 2>/dev/null || true
-      else
-        rm -f "$tmp" 2>/dev/null || true
-        error_exit "无法从 GitHub 获取公钥或无有效公钥"
-      fi
-      ;;
-    3)
-      user_home=${2:-/root}
-      if check_pubkey_enabled_or_keys_exist "$cfg_sshd_config_path" "$user_home"; then
-        backup_file "$cfg_sshd_config_path" >/dev/null
-        disable_password_authentication "$cfg_sshd_config_path"
-        safe_reload_sshd
+main "$@"
