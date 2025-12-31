@@ -333,15 +333,30 @@ print_usage() {
   cat <<EOF
 用法: $0 [命令] [参数]
 
-命令:
-  1 <github-user> [home]   从 GitHub 拉取并安装公钥（可选指定目标主目录，默认 /root），并启用公钥登录
-  3 [home]                 禁用密码登录（仅在检测到公钥认证或目标用户已有公钥时执行）
-  5                        启用密码登录（并允许 root 密码登录）
-  set-port <port>          设置 sshd 端口
-  install-key <pubkey> <home>  将本地公钥文件安装到指定用户主目录
-  enable-fail2ban          安装（如需）并部署 fail2ban sshd jail
-  menu                     交互式菜单
-  help                     显示本帮助
+交互与非交互命令说明（示例）:
+  1 <github-user> [home]      从 GitHub 拉取并安装公钥到指定主目录（默认 /root），并启用公钥登录
+                              非交互示例：sudo $0 1 fengzhanhuaer /root
+  2 | set-port <port>         设置 sshd 端口（数字选项 2 或 命令 set-port）
+                              示例：sudo $0 set-port 2222 或 sudo $0 2 2222
+  3 [home]                    禁用密码登录（仅在检测到公钥认证或目标用户已有公钥时执行）
+                              示例：sudo $0 3 /root
+  4 | enable-fail2ban         安装（如需）并部署 fail2ban sshd jail（需要 root）
+                              示例：sudo $0 enable-fail2ban 或 sudo $0 4
+  5                           启用密码登录并允许 root 密码登录
+                              示例：sudo $0 5
+  install-key <pubkey> <home> 将本地公钥文件安装到指定用户主目录
+                              示例：sudo $0 install-key /tmp/id_rsa.pub /home/user
+  menu                        进入交互式菜单（无参数运行也会进入）
+  help | --help | -h          显示本帮助
+
+说明与安全建议:
+  - 菜单 1 会尝试从 https://github.com/<github-user>.keys 拉取公钥并追加到目标用户的
+    authorized_keys。请确认你信任该 GitHub 账号或先审查拉取到的公钥文件。
+  - 在禁用密码登录（命令 3）前脚本会检测是否启用了公钥认证或目标用户已有
+    authorized_keys，否则会拒绝操作以避免将自己锁定。
+  - 强烈建议先下载并人工审查脚本后再执行，避免在不可信环境下使用 curl|sh
+    管道式一键执行。
+  - 脚本只处理公钥，不会生成或保存私钥；请勿将私钥提交到仓库或与脚本一起分发。
 EOF
 }
 
