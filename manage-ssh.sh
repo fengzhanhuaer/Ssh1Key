@@ -95,7 +95,7 @@ set_sshd_directive() {
   if [ ! -f "$file" ]; then
     error_exit "配置文件 $file 不存在"
   fi
-  # 若存在 key（忽略注释行），替换第一处；否则追加
+  # 若存在 key（忽略注释行），替换所有匹配项；否则追加
   if grep -E "^[[:space:]]*#?[[:space:]]*$key[[:space:]]+" "$file" >/dev/null 2>&1; then
     # 使用临时文件避免就地 sed 兼容问题
     tmp=$(mktemp)
@@ -103,14 +103,12 @@ set_sshd_directive() {
       BEGIN{IGNORECASE=1}
       /^[[:space:]]*#/ { print; next }
       {
-        if(tolower($1)==tolower(k) && !done){
+        if(tolower($1)==tolower(k)){
           print k " " v
-          done=1
         } else {
           print
         }
       }
-      END{ if(!done) print k " " v }
     ' "$file" > "$tmp" && mv "$tmp" "$file"
   else
     printf "\n%s %s\n" "$key" "$value" >>"$file"
@@ -173,8 +171,13 @@ check_pubkey_enabled_or_keys_exist() {
 disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
+  # 禁用所有密码相关的认证方式
   set_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
-  log "已禁用 PasswordAuthentication"
+  set_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
+  set_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
+  set_sshd_directive "$cfg_file" "UsePAM" "no"
+  set_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
+  log "已禁用密码登录相关的所有认证方式"
 }
 
 # 启用密码登录（按要求：允许 root 密码登录）
@@ -363,7 +366,7 @@ EOF
 interactive_menu() {
   # 仅在交互式终端运行
   if [ ! -t 0 ]; then
-    error_exit "非交互式环境，请使用命令行参数或在终端中运行"
+    error_exit "非交互式环境，请使用命令行參数或在终端中运行"
   fi
 
   default_port="22"
@@ -379,7 +382,7 @@ interactive_menu() {
   while :; do
     cat <<EOF
 
-  请选择操作（输入对应编号；回车默认 1）:
+  请选择操作（输入对应编号；不输入直接回车将不执行任何操作）:
   1) 从 GitHub 拉取并安装公钥；启用公钥登录（默认 GitHub 用户: ${default_github_user}, 目标主目录: ${default_user_home}）
   2) 设置 sshd 端口 (当前: ${default_port})
   3) 禁用密码登录（检测已启用公钥或目标用户已有公钥，否则拒绝）
@@ -392,7 +395,11 @@ EOF
       log "读取输入失败，退出"
       break
     fi
-    choice=${choice:-1}
+    # 如果未输入，则不执行任何操作，返回菜单
+    if [ -z "${choice}" ]; then
+      log "未输入选择，返回菜单"
+      continue
+    fi
 
     case "$choice" in
       1)
