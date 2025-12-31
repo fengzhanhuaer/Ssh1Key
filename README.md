@@ -20,10 +20,10 @@
 1. **下载脚本**
    ```bash
    # 使用 curl 下载
-   curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh -o manage-ssh.sh
+   curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -o manage-ssh.sh
    
    # 或使用 wget 下载
-   wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh
+   wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh
    ```
 
 2. **查看脚本内容（重要）**
@@ -49,19 +49,19 @@
 
 ```bash
 # 使用 curl 一键执行（不带参数，自动进入交互式菜单）
-curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash
 
 # 使用 wget 一键执行（不带参数，自动进入交互式菜单）
-wget -q -O - https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh | sudo bash
+wget -q -O - https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash
 
 # 使用 curl 带参数执行
-curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh | sudo bash -s -- [命令] [参数]
+curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash -s -- [命令] [参数]
 
 # 使用 wget 带参数执行
-wget -q -O - https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh | sudo bash -s -- [命令] [参数]
+wget -q -O - https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash -s -- [命令] [参数]
 
 # 示例：一键设置 SSH 端口为 2222
-curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/main/manage-ssh.sh | sudo bash -s -- set-port 2222
+curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh | sudo bash -s -- set-port 2222
 ```
 
 ## 命令说明
