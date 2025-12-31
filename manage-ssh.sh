@@ -210,20 +210,49 @@ check_pubkey_enabled_or_keys_exist() {
   fi
   return 1
 }
-
-# 更严格的禁用密码登录：在全局段写入，避免 Match 覆盖
+# 在脚本中添加处理配置目录的函数
+process_sshd_config_d() {
+  config_dir="/etc/ssh/sshd_config.d"
+  
+  if [ -d "$config_dir" ]; then
+    log "检查 $config_dir 目录中的配置文件..."
+    
+    # 查找并修改所有包含密码认证设置的文件
+    for file in "$config_dir"/*.conf; do
+      if [ -f "$file" ]; then
+        # 备份文件
+        backup_file "$file" >/dev/null
+        
+        # 修改配置
+        set_sshd_directive "$file" "PasswordAuthentication" "no"
+        set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
+        set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
+        set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
+        
+        log "已更新 $file 中的密码认证设置"
+      fi
+    done
+  fi
+}
+# 在 disable_password_authentication 函数中调用此函数
 disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
-
-  set_global_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
+  
+  # 使用全局指令函数确保配置在条件块前生效
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
-  # 不自动改 UsePAM，可能影响系统服务：若需改 PAM 由管理员决定
-  set_global_sshd_directive "$cfg_file" "AuthenticationMethods" "publickey"
+  set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
+  set_global_sshd_directive "$cfg_file" "UsePAM" "no"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
-
-  log "已在全局段禁用密码相关认证，建议仅允许公钥认证"
+  
+  # 处理配置目录中的文件
+  process_sshd_config_d
+  
+  # 验证配置是否正确应用
+  verify_sshd_config "$cfg_file"
+  
+  log "已禁用密码登录相关的所有认证方式"
 }
 
 # 启用密码登录（恢复为允许密码）
