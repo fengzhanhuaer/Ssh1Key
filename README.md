@@ -17,38 +17,43 @@
 
 ### 方式一：分步执行（推荐，更安全）
 
-1. **下载脚本**
-   ```bash
-   # 使用 curl 下载
-   curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -o manage-ssh.sh
-   
-   # 或使用 wget 下载
-   wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh
-   ```
+#### 1. 下载脚本
+使用 curl 下载：
+```bash
+curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -o manage-ssh.sh
+```
 
-2. **查看脚本内容（安全验证）**
-   ```bash
-   # 查看脚本内容，确保安全
-   cat manage-ssh.sh
-   
-   # 或使用分页查看
-   less manage-ssh.sh
-   ```
+或使用 wget 下载：
+```bash
+wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh
+```
 
-3. **赋予执行权限并执行（进入交互式菜单）**
-   ```bash
-   chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
-   ```
+#### 2. 查看脚本内容（安全验证）
+查看脚本内容：
+```bash
+cat manage-ssh.sh
+```
+
+或使用分页查看：
+```bash
+less manage-ssh.sh
+```
+
+#### 3. 赋予执行权限并执行
+```bash
+chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
+```
 
 ### 方式二：单命令执行（便捷）
-
 如果您信任脚本来源，可以使用以下单条命令完成下载、授权和执行（自动进入交互式菜单）：
 
+使用 curl：
 ```bash
-# 使用 curl 的单命令执行
 curl -fsSL https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -o manage-ssh.sh && chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
+```
 
-# 使用 wget 的单命令执行
+使用 wget：
+```bash
 wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ssh.sh -O manage-ssh.sh && chmod +x manage-ssh.sh && sudo ./manage-ssh.sh
 ```
 
@@ -57,7 +62,6 @@ wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ss
 ## 交互式菜单操作
 
 执行脚本后，您会看到以下交互式菜单：
-
 
 ## 命令说明
 
@@ -77,59 +81,61 @@ wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ss
 
 ### 1. 从 GitHub 拉取并安装公钥
 
+使用默认 GitHub 用户和主目录：
 ```bash
-# 使用默认 GitHub 用户和主目录
 sudo ./manage-ssh.sh 1
+```
 
-# 指定 GitHub 用户
+指定 GitHub 用户：
+```bash
 sudo ./manage-ssh.sh 1 john_doe
+```
 
-# 指定 GitHub 用户和目标主目录
+指定 GitHub 用户和目标主目录：
+```bash
 sudo ./manage-ssh.sh 1 john_doe /home/john
 ```
 
 ### 2. 设置 SSH 端口
-
 ```bash
-# 设置端口为 2222
 sudo ./manage-ssh.sh set-port 2222
 ```
 
 ### 3. 安装本地公钥
-
 ```bash
-# 安装本地公钥到用户主目录
 sudo ./manage-ssh.sh install-key ~/.ssh/id_rsa.pub /home/john
 ```
 
 ### 4. 禁用密码登录
 
+使用默认主目录：
 ```bash
-# 使用默认主目录
 sudo ./manage-ssh.sh 3
+```
 
-# 指定主目录
+指定主目录：
+```bash
 sudo ./manage-ssh.sh 3 /home/john
 ```
 
 ### 5. 启用密码登录
-
 ```bash
 sudo ./manage-ssh.sh 5
 ```
 
 ### 6. 安装并配置 fail2ban
 
+使用数字命令：
 ```bash
-# 使用数字命令
 sudo ./manage-ssh.sh 4
+```
 
-# 或使用完整命令
+或使用完整命令：
+```bash
 sudo ./manage-ssh.sh enable-fail2ban
 ```
 
 ### 7. 启动交互式菜单
-
 ```bash
 sudo ./manage-ssh.sh menu
 ```
