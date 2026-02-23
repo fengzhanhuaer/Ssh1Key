@@ -342,6 +342,62 @@ diagnose_socket_activation_port_issue() {
     log "提示: socket 模式下监听端口可能由 *.socket 的 ListenStream 控制，而非 sshd_config 的 Port。"
   fi
 }
+
+check_password_auth_disabled_for_user() {
+  user="$1"
+
+  if ! command -v sshd >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ -n "$user" ]; then
+    effective_cfg=$(sshd -T -C "user=$user,host=localhost,addr=127.0.0.1" 2>/dev/null || true)
+  else
+    effective_cfg=$(sshd -T 2>/dev/null || true)
+  fi
+
+  if [ -z "$effective_cfg" ]; then
+    return 0
+  fi
+
+  pa=$(printf "%s\n" "$effective_cfg" | awk '$1=="passwordauthentication"{print $2; exit}')
+  kia=$(printf "%s\n" "$effective_cfg" | awk '$1=="kbdinteractiveauthentication"{print $2; exit}')
+  cra=$(printf "%s\n" "$effective_cfg" | awk '$1=="challengeresponseauthentication"{print $2; exit}')
+
+  if [ "$pa" = "yes" ] || [ "$kia" = "yes" ] || [ "$cra" = "yes" ]; then
+    return 1
+  fi
+  return 0
+}
+
+verify_password_authentication_disabled() {
+  if ! command -v sshd >/dev/null 2>&1; then
+    log "警告: 未找到 sshd 命令，跳过密码认证生效校验"
+    return 0
+  fi
+
+  if ! check_password_auth_disabled_for_user ""; then
+    log "警告: 默认上下文下仍检测到密码相关认证为启用"
+    return 1
+  fi
+
+  if [ -f /etc/passwd ] && grep -E '^root:' /etc/passwd >/dev/null 2>&1; then
+    if ! check_password_auth_disabled_for_user "root"; then
+      log "警告: root 上下文下仍检测到密码相关认证为启用"
+      return 1
+    fi
+  fi
+
+  if [ -n "${SUDO_USER:-}" ]; then
+    if ! check_password_auth_disabled_for_user "$SUDO_USER"; then
+      log "警告: 用户 $SUDO_USER 上下文下仍检测到密码相关认证为启用"
+      return 1
+    fi
+  fi
+
+  log "已确认密码相关认证在已检查上下文中为禁用状态"
+  return 0
+}
 # 验证 sshd 配置是否正确应用
 verify_sshd_config() {
   cfg_file="$1"
@@ -373,32 +429,74 @@ verify_sshd_config() {
 }
 
 # 处理 sshd_config.d 目录中的配置文件
+apply_password_disable_policy_to_file() {
+  file="$1"
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+
+  if ! grep -Eiq '^[[:space:]]*#?[[:space:]]*(PasswordAuthentication|PermitRootLogin|ChallengeResponseAuthentication|KbdInteractiveAuthentication|UsePAM)[[:space:]]+' "$file"; then
+    return 0
+  fi
+
+  backup_file "$file" >/dev/null
+  set_sshd_directive "$file" "PasswordAuthentication" "no"
+  set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
+  set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
+  set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
+  set_sshd_directive "$file" "UsePAM" "no"
+
+  log "已更新 $file 中的密码认证设置"
+}
+
 process_sshd_config_d() {
   config_dir="/etc/ssh/sshd_config.d"
   
   if [ -d "$config_dir" ]; then
     log "检查 $config_dir 目录中的配置文件..."
     
-    # 仅修改已经出现相关认证指令的文件，避免无关文件被追加配置
     for file in "$config_dir"/*.conf; do
       if [ -f "$file" ]; then
-        if ! grep -Eiq '^[[:space:]]*#?[[:space:]]*(PasswordAuthentication|PermitRootLogin|ChallengeResponseAuthentication|KbdInteractiveAuthentication)[[:space:]]+' "$file"; then
-          continue
-        fi
-
-        # 备份文件
-        backup_file "$file" >/dev/null
-        
-        # 修改配置
-        set_sshd_directive "$file" "PasswordAuthentication" "no"
-        set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
-        set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
-        set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
-        
-        log "已更新 $file 中的密码认证设置"
+        apply_password_disable_policy_to_file "$file"
       fi
     done
   fi
+}
+
+process_sshd_included_configs() {
+  cfg_file="$1"
+  if [ ! -f "$cfg_file" ]; then
+    return 0
+  fi
+
+  awk '
+    BEGIN { IGNORECASE = 1 }
+    /^[[:space:]]*#/ { next }
+    tolower($1) == "include" {
+      for (i = 2; i <= NF; i++) {
+        print $i
+      }
+    }
+  ' "$cfg_file" | while IFS= read -r include_pattern; do
+    if [ -z "$include_pattern" ]; then
+      continue
+    fi
+
+    case "$include_pattern" in
+      /*)
+        abs_pattern="$include_pattern"
+        ;;
+      *)
+        abs_pattern="/etc/ssh/$include_pattern"
+        ;;
+    esac
+
+    for included_file in $abs_pattern; do
+      if [ -f "$included_file" ] && [ "$included_file" != "$cfg_file" ]; then
+        apply_password_disable_policy_to_file "$included_file"
+      fi
+    done
+  done
 }
 
 # 禁用密码登录
@@ -406,13 +504,23 @@ disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
   
-  # 使用全局指令函数确保配置在条件块前生效
+  # 先写全局指令，确保默认路径生效
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "UsePAM" "no"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
+
+  # 再覆盖主配置中所有上下文（含 Match）里的同名指令，避免局部放开
+  set_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
+  set_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
+  set_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
+  set_sshd_directive "$cfg_file" "UsePAM" "no"
+  set_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
   
+  # 处理主配置中 Include 引入的文件（兼容自定义目录）
+  process_sshd_included_configs "$cfg_file"
+
   # 处理配置目录中的文件
   process_sshd_config_d
   
@@ -668,6 +776,9 @@ action_disable_password_authentication() {
   fi
   disable_password_authentication "$cfg_sshd_config_path"
   safe_reload_sshd
+  if ! verify_password_authentication_disabled; then
+    error_exit "禁用密码登录未完全生效，可能仍被 Match/Include/socket 配置覆盖"
+  fi
 }
 
 action_enable_password_authentication() {
