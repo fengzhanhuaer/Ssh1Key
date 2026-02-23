@@ -21,6 +21,41 @@ error_exit() {
   exit 1
 }
 
+write_or_append_sshd_directive() {
+  file="$1"
+  key="$2"
+  value="$3"
+
+  tmp=$(mktemp)
+  if ! awk -v k="$key" -v v="$value" '
+    BEGIN {
+      IGNORECASE = 1
+      replaced = 0
+    }
+    /^[[:space:]]*#/ {
+      print
+      next
+    }
+    {
+      if (tolower($1) == tolower(k)) {
+        print k " " v
+        replaced = 1
+      } else {
+        print
+      }
+    }
+    END {
+      if (!replaced) {
+        print k " " v
+      }
+    }
+  ' "$file" >"$tmp"; then
+    rm -f "$tmp" 2>/dev/null || true
+    error_exit "更新 sshd 指令失败: $key"
+  fi
+  mv "$tmp" "$file"
+}
+
 ensure_backup_dir() {
   if [ ! -d "$cfg_backup_dir" ]; then
     mkdir -p "$cfg_backup_dir"
@@ -34,16 +69,6 @@ backup_file() {
   dst="$cfg_backup_dir/$(basename "$src").$ts.bak"
   cp -p "$src" "$dst" || error_exit "备份 $src 失败"
   printf "%s" "$dst"
-}
-
-detect_init_system() {
-  if command -v systemctl >/dev/null 2>&1; then
-    printf "systemd"
-  elif command -v service >/dev/null 2>&1; then
-    printf "sysv"
-  else
-    printf "unknown"
-  fi
 }
 
 detect_pkg_manager() {
@@ -72,19 +97,27 @@ safe_reload_sshd() {
     fi
   fi
 
-  init_sys=$(detect_init_system)
-  case "$init_sys" in
-    systemd)
-      systemctl reload sshd 2>/dev/null || systemctl restart sshd
-      ;;
-    sysv)
-      service ssh reload 2>/dev/null || service sshd restart 2>/dev/null || service ssh restart
-      ;;
-    *)
-      error_exit "无法识别 init 系统，手动重载 sshd"
-      ;;
-  esac
-  log "sshd 已重载/重启（如果可用）。"
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl reload sshd 2>/dev/null ||
+      systemctl reload ssh 2>/dev/null ||
+      systemctl restart sshd 2>/dev/null ||
+      systemctl restart ssh 2>/dev/null; then
+      log "sshd 已重载/重启（systemd）。"
+      return 0
+    fi
+  fi
+
+  if command -v service >/dev/null 2>&1; then
+    if service ssh reload 2>/dev/null ||
+      service sshd reload 2>/dev/null ||
+      service ssh restart 2>/dev/null ||
+      service sshd restart 2>/dev/null; then
+      log "sshd 已重载/重启（service）。"
+      return 0
+    fi
+  fi
+
+  error_exit "无法自动重载/重启 sshd，请手动执行"
 }
 
 set_sshd_directive() {
@@ -95,22 +128,7 @@ set_sshd_directive() {
   if [ ! -f "$file" ]; then
     error_exit "配置文件 $file 不存在"
   fi
-  if grep -E "^[[:space:]]*#?[[:space:]]*$key[[:space:]]+" "$file" >/dev/null 2>&1; then
-    tmp=$(mktemp)
-    awk -v k="$key" -v v="$value" '
-      BEGIN{IGNORECASE=1}
-      /^[[:space:]]*#/ { print; next }
-      {
-        if(tolower($1)==tolower(k)){
-          print k " " v
-        } else {
-          print
-        }
-      }
-    ' "$file" > "$tmp" && mv "$tmp" "$file"
-  else
-    printf "\n%s %s\n" "$key" "$value" >>"$file"
-  fi
+  write_or_append_sshd_directive "$file" "$key" "$value"
 }
 
 # 在全局段（first Match 之前）替换/追加指令，避免被后续 Match 覆盖
@@ -125,8 +143,9 @@ set_global_sshd_directive() {
 
   head_tmp=$(mktemp)
   tail_tmp=$(mktemp)
+  merged_tmp=$(mktemp)
 
-  match_line=$(awk '/^Match[[:space:]]/ {print NR; exit}' "$file" 2>/dev/null || true)
+  match_line=$(awk '/^[[:space:]]*Match[[:space:]]+/ {print NR; exit}' "$file" 2>/dev/null || true)
   if [ -z "$match_line" ]; then
     head_end=$(wc -l <"$file" 2>/dev/null || echo 0)
   else
@@ -141,24 +160,11 @@ set_global_sshd_directive() {
     cat "$file" > "$tail_tmp"
   fi
 
-  if grep -E "^[[:space:]]*#?[[:space:]]*$key[[:space:]]+" "$head_tmp" >/dev/null 2>&1; then
-    awk -v k="$key" -v v="$value" '
-      BEGIN{IGNORECASE=1}
-      /^[[:space:]]*#/ { print; next }
-      {
-        if(tolower($1)==tolower(k)){
-          print k " " v
-        } else {
-          print
-        }
-      }
-    ' "$head_tmp" > "${head_tmp}.new" && mv "${head_tmp}.new" "$head_tmp"
-  else
-    printf "\n%s %s\n" "$key" "$value" >>"$head_tmp"
-  fi
+  write_or_append_sshd_directive "$head_tmp" "$key" "$value"
 
-  cat "$head_tmp" "$tail_tmp" >"${file}.tmp" && mv "${file}.tmp" "$file"
-  rm -f "$head_tmp" "$tail_tmp" 2>/dev/null || true
+  cat "$head_tmp" "$tail_tmp" >"$merged_tmp"
+  mv "$merged_tmp" "$file"
+  rm -f "$head_tmp" "$tail_tmp" "$merged_tmp" 2>/dev/null || true
 }
 
 # 从 GitHub 获取用户公钥列表，输出到指定文件（out）
@@ -166,6 +172,10 @@ fetch_github_keys() {
   user="$1"
   out="$2"
   if [ -z "$user" ] || [ -z "$out" ]; then
+    return 1
+  fi
+  # GitHub username 基本格式校验，避免无效请求
+  if ! printf "%s" "$user" | grep -E '^[A-Za-z0-9][A-Za-z0-9-]*$' >/dev/null 2>&1; then
     return 1
   fi
   url="https://github.com/${user}.keys"
@@ -210,6 +220,64 @@ check_pubkey_enabled_or_keys_exist() {
   fi
   return 1
 }
+
+# 获取 sshd 实际生效端口（逗号分隔）。优先 sshd -T，其次回退到主配置文件。
+get_effective_sshd_ports() {
+  ports=""
+
+  if command -v sshd >/dev/null 2>&1; then
+    ports=$(sshd -T 2>/dev/null | awk '
+      BEGIN {
+        out = ""
+      }
+      tolower($1) == "port" && $2 ~ /^[0-9]+$/ {
+        if (!seen[$2]++) {
+          if (out == "") {
+            out = $2
+          } else {
+            out = out "," $2
+          }
+        }
+      }
+      END {
+        print out
+      }
+    ')
+  fi
+
+  if [ -n "$ports" ]; then
+    printf "%s" "$ports"
+    return 0
+  fi
+
+  if [ -f "$cfg_sshd_config_path" ]; then
+    ports=$(awk '
+      BEGIN {
+        IGNORECASE = 1
+        out = ""
+      }
+      /^[[:space:]]*#/ { next }
+      tolower($1) == "port" && $2 ~ /^[0-9]+$/ {
+        if (!seen[$2]++) {
+          if (out == "") {
+            out = $2
+          } else {
+            out = out "," $2
+          }
+        }
+      }
+      END {
+        print out
+      }
+    ' "$cfg_sshd_config_path" 2>/dev/null || true)
+  fi
+
+  if [ -n "$ports" ]; then
+    printf "%s" "$ports"
+  else
+    printf "22"
+  fi
+}
 # 验证 sshd 配置是否正确应用
 verify_sshd_config() {
   cfg_file="$1"
@@ -218,7 +286,10 @@ verify_sshd_config() {
   
   # 使用 sshd -T 检查实际生效的配置
   if command -v sshd >/dev/null 2>&1; then
-    actual_config=$(sshd -T)
+    if ! actual_config=$(sshd -T 2>/dev/null); then
+      log "警告: sshd -T 执行失败，跳过生效配置检查"
+      return 0
+    fi
     
     # 检查关键配置项
     if echo "$actual_config" | grep -i "passwordauthentication yes" >/dev/null 2>&1; then
@@ -244,9 +315,13 @@ process_sshd_config_d() {
   if [ -d "$config_dir" ]; then
     log "检查 $config_dir 目录中的配置文件..."
     
-    # 查找并修改所有包含密码认证设置的文件
+    # 仅修改已经出现相关认证指令的文件，避免无关文件被追加配置
     for file in "$config_dir"/*.conf; do
       if [ -f "$file" ]; then
+        if ! grep -Eiq '^[[:space:]]*#?[[:space:]]*(PasswordAuthentication|PermitRootLogin|ChallengeResponseAuthentication|KbdInteractiveAuthentication)[[:space:]]+' "$file"; then
+          continue
+        fi
+
         # 备份文件
         backup_file "$file" >/dev/null
         
@@ -306,8 +381,7 @@ set_ssh_port() {
   if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ] 2>/dev/null; then
     error_exit "端口超出范围 (1-65535)"
   fi
-  backup_file "$cfg_file" >/dev/null
-  set_sshd_directive "$cfg_file" "Port" "$port"
+  set_global_sshd_directive "$cfg_file" "Port" "$port"
 }
 
 install_authorized_key() {
@@ -325,12 +399,39 @@ install_authorized_key() {
   chmod 700 "$ssh_dir"
   touch "$auth_file"
   chmod 600 "$auth_file"
-  if ! grep -Fxf "$pubkey_file" "$auth_file" >/dev/null 2>&1; then
-    cat "$pubkey_file" >>"$auth_file"
-    log "已将公钥追加到 $auth_file"
+
+  valid_count=0
+  add_count=0
+  while IFS= read -r key_line || [ -n "$key_line" ]; do
+    # 跳过空行和注释行
+    case "$key_line" in
+      "" | \#*)
+        continue
+        ;;
+    esac
+
+    # 仅接受常见 SSH 公钥前缀
+    if ! printf "%s" "$key_line" | grep -E '^(ssh-|ecdsa-|sk-|ed25519-)' >/dev/null 2>&1; then
+      continue
+    fi
+    valid_count=$((valid_count + 1))
+
+    if ! grep -Fqx "$key_line" "$auth_file" >/dev/null 2>&1; then
+      printf "%s\n" "$key_line" >>"$auth_file"
+      add_count=$((add_count + 1))
+    fi
+  done <"$pubkey_file"
+
+  if [ "$valid_count" -eq 0 ]; then
+    error_exit "未找到有效的 SSH 公钥: $pubkey_file"
+  fi
+
+  if [ "$add_count" -gt 0 ]; then
+    log "已向 $auth_file 追加 $add_count 条公钥"
   else
     log "公钥已存在于 $auth_file"
   fi
+
   if [ -f /etc/passwd ]; then
     owner=$(awk -F: -v dir="$user_home" '$6==dir{print $1; exit}' /etc/passwd || true)
     if [ -n "$owner" ]; then
@@ -413,11 +514,14 @@ configure_fail2ban() {
     fi
   fi
 
+  fail2ban_port=$(get_effective_sshd_ports)
+  fail2ban_port=${fail2ban_port:-ssh}
+
   tmpfile=$(mktemp)
-  cat >"$tmpfile" <<'EOF'
+  cat >"$tmpfile" <<EOF
 [sshd]
 enabled = true
-port    = ssh
+port    = $fail2ban_port
 logpath = %(sshd_log)s
 maxretry = 5
 EOF
@@ -435,8 +539,128 @@ EOF
 
 print_usage() {
   cat <<EOF
-用法：运行脚本将进入交互式主菜单（不再接受命令行参数）
+用法:
+  ./manage-ssh.sh
+  ./manage-ssh.sh menu
+  ./manage-ssh.sh help
+
+命令模式:
+  ./manage-ssh.sh 1 [github_user] [user_home]
+  ./manage-ssh.sh install-github-key [github_user] [user_home]
+  ./manage-ssh.sh 2 <port>
+  ./manage-ssh.sh set-port <port>
+  ./manage-ssh.sh 3 [user_home]
+  ./manage-ssh.sh disable-password [user_home]
+  ./manage-ssh.sh 4
+  ./manage-ssh.sh enable-fail2ban
+  ./manage-ssh.sh 5
+  ./manage-ssh.sh enable-password
+  ./manage-ssh.sh install-key <pubkey_file> <user_home>
 EOF
+}
+
+action_install_github_key() {
+  gh_user="$1"
+  user_home="$2"
+
+  ensure_root
+
+  tmp=$(mktemp)
+  trap 'rm -f "$tmp" 2>/dev/null || true' EXIT HUP INT TERM
+  if ! fetch_github_keys "$gh_user" "$tmp"; then
+    log "无法从 GitHub 获取公钥或未发现有效公钥: $gh_user"
+    return 1
+  fi
+
+  install_authorized_key "$tmp" "$user_home"
+  enable_pubkey_authentication "$cfg_sshd_config_path"
+  safe_reload_sshd
+
+  trap - EXIT HUP INT TERM
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+action_set_ssh_port() {
+  port="$1"
+
+  ensure_root
+  backup_file "$cfg_sshd_config_path" >/dev/null
+  set_ssh_port "$cfg_sshd_config_path" "$port"
+  safe_reload_sshd
+}
+
+action_disable_password_authentication() {
+  user_home="$1"
+
+  ensure_root
+  if ! check_pubkey_enabled_or_keys_exist "$cfg_sshd_config_path" "$user_home"; then
+    log "未检测到公钥认证或目标用户无公钥，拒绝禁用密码登录以避免被锁定"
+    return 1
+  fi
+  disable_password_authentication "$cfg_sshd_config_path"
+  safe_reload_sshd
+}
+
+action_enable_password_authentication() {
+  ensure_root
+  enable_password_authentication "$cfg_sshd_config_path"
+  safe_reload_sshd
+}
+
+action_configure_fail2ban() {
+  ensure_root
+  configure_fail2ban
+}
+
+action_install_local_key() {
+  pubkey_file="$1"
+  user_home="$2"
+
+  ensure_root
+  install_authorized_key "$pubkey_file" "$user_home"
+}
+
+run_cli_command() {
+  cmd="$1"
+  case "$cmd" in
+    help|-h|--help)
+      print_usage
+      ;;
+    menu)
+      interactive_menu
+      ;;
+    1|install-github-key)
+      gh_user="${2:-${SUDO_USER:-$(whoami)}}"
+      user_home="${3:-/root}"
+      action_install_github_key "$gh_user" "$user_home"
+      ;;
+    2|set-port)
+      if [ "$#" -lt 2 ]; then
+        error_exit "缺少端口参数。示例: ./manage-ssh.sh set-port 2222"
+      fi
+      action_set_ssh_port "$2"
+      ;;
+    3|disable-password)
+      user_home="${2:-/root}"
+      action_disable_password_authentication "$user_home"
+      ;;
+    4|enable-fail2ban)
+      action_configure_fail2ban
+      ;;
+    5|enable-password)
+      action_enable_password_authentication
+      ;;
+    install-key)
+      if [ "$#" -lt 3 ]; then
+        error_exit "缺少参数。示例: ./manage-ssh.sh install-key ~/.ssh/id_ed25519.pub /home/user"
+      fi
+      action_install_local_key "$2" "$3"
+      ;;
+    *)
+      print_usage
+      error_exit "无效命令: $cmd"
+      ;;
+  esac
 }
 
 interactive_menu() {
@@ -444,22 +668,19 @@ interactive_menu() {
     error_exit "非交互式环境，请在终端中运行"
   fi
 
-  default_port="22"
-  if [ -f "$cfg_sshd_config_path" ]; then
-    p=$(awk 'BEGIN{FS="[ \t]+"} /^[[:space:]]*Port[[:space:]]+[0-9]+/ {print $2; exit}' "$cfg_sshd_config_path" 2>/dev/null || true)
-    if [ -n "$p" ]; then
-      default_port="$p"
-    fi
-  fi
   default_user_home="/root"
   default_github_user=${SUDO_USER:-$(whoami)}
 
   while :; do
+    current_ports=$(get_effective_sshd_ports)
+    default_port=$(printf "%s" "$current_ports" | awk -F',' '{print $1}')
+    default_port=${default_port:-22}
+
     cat <<EOF
 
   请选择操作（输入对应编号；直接回车将返回菜单）:
   1) 从 GitHub 拉取并安装公钥；启用公钥登录（默认 GitHub 用户: ${default_github_user}, 目标主目录: ${default_user_home}）
-  2) 设置 sshd 端口 (当前: ${default_port})
+  2) 设置 sshd 端口 (当前: ${current_ports})
   3) 禁用密码登录（检测已启用公钥或目标用户已有公钥，否则拒绝）
   4) 安装并部署 fail2ban sshd jail
   5) 启用密码登录（并允许 root 密码登录）
@@ -483,42 +704,31 @@ EOF
         printf "目标用户主目录（回车使用 %s）: " "$default_user_home"
         read -r user_home || user_home="$default_user_home"
         user_home=${user_home:-$default_user_home}
-        tmp=$(mktemp)
-        if fetch_github_keys "$gh_user" "$tmp"; then
-          install_authorized_key "$tmp" "$user_home"
-          enable_pubkey_authentication "$cfg_sshd_config_path"
-          safe_reload_sshd
-        else
-          rm -f "$tmp" 2>/dev/null || true
-          log "无法从 GitHub 获取公钥或无有效公钥，操作已取消"
+        if ! action_install_github_key "$gh_user" "$user_home"; then
+          :
         fi
         ;;
       2)
         printf "请输入新的 sshd 端口 (回车使用 %s): " "$default_port"
         read -r port || port="$default_port"
         port=${port:-$default_port}
-        backup_file "$cfg_sshd_config_path" >/dev/null
-        set_ssh_port "$cfg_sshd_config_path" "$port"
-        safe_reload_sshd
+        action_set_ssh_port "$port"
         ;;
       3)
         printf "目标用户主目录（回车使用 %s）: " "$default_user_home"
         read -r user_home || user_home="$default_user_home"
         user_home=${user_home:-$default_user_home}
-        if check_pubkey_enabled_or_keys_exist "$cfg_sshd_config_path" "$user_home"; then
-          backup_file "$cfg_sshd_config_path" >/dev/null
-          disable_password_authentication "$cfg_sshd_config_path"
-          safe_reload_sshd
-        else
-          log "未检测到公钥认证或目标用户无公钥，拒绝禁用密码登录以避免被锁定"
+        if ! action_disable_password_authentication "$user_home"; then
+          :
         fi
         ;;
       4)
-        configure_fail2ban
+        if ! action_configure_fail2ban; then
+          :
+        fi
         ;;
       5)
-        enable_password_authentication "$cfg_sshd_config_path"
-        safe_reload_sshd
+        action_enable_password_authentication
         ;;
       0)
         log "退出"
@@ -532,8 +742,11 @@ EOF
 }
 
 main() {
-  # 仅交互式主菜单 — 忽略任何命令行参数
-  interactive_menu
+  if [ "$#" -eq 0 ]; then
+    interactive_menu
+  else
+    run_cli_command "$@"
+  fi
   exit 0
 }
 
