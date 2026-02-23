@@ -576,6 +576,9 @@ install_authorized_key() {
   valid_count=0
   add_count=0
   while IFS= read -r key_line || [ -n "$key_line" ]; do
+    # 去除可能存在的 Windows 回车符 (\r) 和空白字符，防止 sshd 解析出错（特别是没有 comment 的 key）
+    key_line=$(printf "%s" "$key_line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
     # 跳过空行和注释行
     case "$key_line" in
       "" | \#*)
@@ -753,10 +756,26 @@ action_install_github_key() {
   rm -f "$tmp" 2>/dev/null || true
 }
 
+disable_ssh_socket() {
+  if command -v systemctl >/dev/null 2>&1; then
+    for sock in ssh.socket sshd.socket; do
+      if systemctl is-active "$sock" >/dev/null 2>&1 || systemctl is-enabled "$sock" >/dev/null 2>&1; then
+        log "检测到 $sock 激活，正在禁用 socket 改用 service，以确保端口设置完全生效..."
+        systemctl stop "$sock" 2>/dev/null || true
+        systemctl disable "$sock" 2>/dev/null || true
+        svc=$(echo "$sock" | sed 's/\.socket$/.service/')
+        systemctl enable "$svc" 2>/dev/null || true
+        systemctl start "$svc" 2>/dev/null || true
+      fi
+    done
+  fi
+}
+
 action_set_ssh_port() {
   port="$1"
 
   ensure_root
+  disable_ssh_socket
   backup_file "$cfg_sshd_config_path" >/dev/null
   set_ssh_port "$cfg_sshd_config_path" "$port"
   safe_reload_sshd
