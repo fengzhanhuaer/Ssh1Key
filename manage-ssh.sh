@@ -7,6 +7,7 @@ set -eu
 cfg_sshd_config_path="/etc/ssh/sshd_config"
 cfg_backup_dir="/var/backups/ssh-manager"
 cfg_fail2ban_jail="/etc/fail2ban/jail.d/ssh-manager.local"
+cfg_sshd_port_override="/etc/ssh/sshd_config.d/99-ssh-manager-port.conf"
 
 tmp_timestamp() {
   date +"%Y%m%dT%H%M%S"
@@ -278,6 +279,69 @@ get_effective_sshd_ports() {
     printf "22"
   fi
 }
+
+port_list_contains() {
+  port_list="$1"
+  target_port="$2"
+  case ",$port_list," in
+    *,"$target_port",*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+ensure_sshd_port_override_file() {
+  port="$1"
+  config_dir=$(dirname "$cfg_sshd_port_override")
+
+  if [ ! -d "$config_dir" ]; then
+    return 0
+  fi
+
+  if [ -f "$cfg_sshd_port_override" ]; then
+    backup_file "$cfg_sshd_port_override" >/dev/null
+  fi
+
+  tmp=$(mktemp)
+  cat >"$tmp" <<EOF
+# Managed by ssh-manager. Keep this file last to avoid port override surprises.
+Port $port
+EOF
+  mv "$tmp" "$cfg_sshd_port_override"
+}
+
+verify_ssh_port_effective() {
+  expected_port="$1"
+  actual_ports=$(get_effective_sshd_ports)
+
+  if port_list_contains "$actual_ports" "$expected_port"; then
+    log "sshd 生效端口: $actual_ports"
+    return 0
+  fi
+
+  log "警告: 目标端口 $expected_port 未生效，当前生效端口: $actual_ports"
+  return 1
+}
+
+diagnose_socket_activation_port_issue() {
+  active_sockets=""
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active ssh.socket >/dev/null 2>&1; then
+      active_sockets="$active_sockets ssh.socket"
+    fi
+    if systemctl is-active sshd.socket >/dev/null 2>&1; then
+      active_sockets="$active_sockets sshd.socket"
+    fi
+  fi
+
+  if [ -n "$active_sockets" ]; then
+    log "提示: 检测到 systemd socket 激活:$active_sockets"
+    log "提示: socket 模式下监听端口可能由 *.socket 的 ListenStream 控制，而非 sshd_config 的 Port。"
+  fi
+}
 # 验证 sshd 配置是否正确应用
 verify_sshd_config() {
   cfg_file="$1"
@@ -382,6 +446,7 @@ set_ssh_port() {
     error_exit "端口超出范围 (1-65535)"
   fi
   set_global_sshd_directive "$cfg_file" "Port" "$port"
+  ensure_sshd_port_override_file "$port"
 }
 
 install_authorized_key() {
@@ -587,6 +652,10 @@ action_set_ssh_port() {
   backup_file "$cfg_sshd_config_path" >/dev/null
   set_ssh_port "$cfg_sshd_config_path" "$port"
   safe_reload_sshd
+  if ! verify_ssh_port_effective "$port"; then
+    diagnose_socket_activation_port_issue
+    error_exit "SSH 端口修改未生效，请根据提示检查并重试"
+  fi
 }
 
 action_disable_password_authentication() {
