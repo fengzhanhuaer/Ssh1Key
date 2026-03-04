@@ -444,7 +444,6 @@ apply_password_disable_policy_to_file() {
   set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
   set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
   set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
-  set_sshd_directive "$file" "UsePAM" "no"
 
   log "已更新 $file 中的密码认证设置"
 }
@@ -508,14 +507,12 @@ disable_password_authentication() {
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
-  set_global_sshd_directive "$cfg_file" "UsePAM" "no"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
 
   # 再覆盖主配置中所有上下文（含 Match）里的同名指令，避免局部放开
   set_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
-  set_sshd_directive "$cfg_file" "UsePAM" "no"
   set_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
   
   # 处理主配置中 Include 引入的文件（兼容自定义目录）
@@ -538,6 +535,8 @@ enable_password_authentication() {
 
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "yes"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "UsePAM" "yes"
   set_global_sshd_directive "$cfg_file" "AuthenticationMethods" "any"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "yes"
 
