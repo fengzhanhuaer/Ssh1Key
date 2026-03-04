@@ -364,6 +364,26 @@ ensure_sshd_port_override_file() {
 Port $port
 EOF
   mv "$tmp" "$cfg_sshd_port_override"
+
+  # 将主配置及其他 include 文件中的 Port 指令注释掉，避免多端口累加
+  # （OpenSSH 的 Port 是累加而非覆盖，必须只保留一个来源）
+  _remove_port_from_file() {
+    _file="$1"
+    if [ ! -f "$_file" ]; then return 0; fi
+    # 跳过我们自己管理的 override 文件
+    [ "$_file" = "$cfg_sshd_port_override" ] && return 0
+    if grep -Eq '^[[:space:]]*Port[[:space:]]+[0-9]+' "$_file" 2>/dev/null; then
+      backup_file "$_file" >/dev/null
+      sed -i 's/^[[:space:]]*Port[[:space:]]\+[0-9]\+/# & (commented by ssh-manager, see sshd_config.d\/99-ssh-manager-port.conf)/' "$_file"
+      log "已注释 $_file 中的 Port 指令（由 override 文件统一管理）"
+    fi
+  }
+
+  _remove_port_from_file "$cfg_sshd_config_path"
+
+  for _f in "$config_dir"/*.conf; do
+    [ -f "$_f" ] && _remove_port_from_file "$_f"
+  done
 }
 
 verify_ssh_port_effective() {
