@@ -466,8 +466,29 @@ check_pubkey_auth_enabled_for_user() {
   pa=$(printf "%s\n" "$effective_cfg" | awk '$1=="pubkeyauthentication"{print $2; exit}')
   akf=$(printf "%s\n" "$effective_cfg" | awk '$1=="authorizedkeysfile"{print $2; exit}')
 
-  if [ "$pa" = "yes" ] && [ -n "$akf" ]; then
+  case "$pa" in
+    yes|unbound|host-bound)
+      pa_enabled=1
+      ;;
+    *)
+      pa_enabled=0
+      ;;
+  esac
+
+  if [ -n "$akf" ] && [ "$akf" != "none" ]; then
+    akf_enabled=1
+  else
+    akf_enabled=0
+  fi
+
+  if [ "$pa_enabled" -eq 1 ] && [ "$akf_enabled" -eq 1 ]; then
     return 0
+  fi
+
+  if [ -n "$user" ]; then
+    log "警告: 用户 $user 生效配置 pubkeyauthentication=${pa:-<empty>} authorizedkeysfile=${akf:-<empty>}"
+  else
+    log "警告: 默认生效配置 pubkeyauthentication=${pa:-<empty>} authorizedkeysfile=${akf:-<empty>}"
   fi
 
   return 1
@@ -481,19 +502,37 @@ verify_pubkey_authentication_enabled() {
     return 0
   fi
 
-  if ! check_pubkey_auth_enabled_for_user ""; then
+  default_ok=0
+  target_ok=0
+
+  if check_pubkey_auth_enabled_for_user ""; then
+    default_ok=1
+  fi
+
+  if [ -n "$target_user" ]; then
+    if check_pubkey_auth_enabled_for_user "$target_user"; then
+      target_ok=1
+    fi
+
+    if [ "$target_ok" -ne 1 ]; then
+      log "警告: 用户 $target_user 上下文下 PubkeyAuthentication 未启用"
+      return 1
+    fi
+
+    if [ "$default_ok" -ne 1 ]; then
+      log "提示: 默认上下文未启用公钥，但目标用户上下文已启用（可能由 Match 规则导致）"
+    fi
+
+    log "已确认目标用户 $target_user 的公钥认证为启用状态"
+    return 0
+  fi
+
+  if [ "$default_ok" -ne 1 ]; then
     log "警告: 默认上下文下 PubkeyAuthentication 未启用"
     return 1
   fi
 
-  if [ -n "$target_user" ]; then
-    if ! check_pubkey_auth_enabled_for_user "$target_user"; then
-      log "警告: 用户 $target_user 上下文下 PubkeyAuthentication 未启用"
-      return 1
-    fi
-  fi
-
-  log "已确认公钥认证在已检查上下文中为启用状态"
+  log "已确认公钥认证在默认上下文中为启用状态"
   return 0
 }
 
