@@ -371,10 +371,63 @@ fetch_github_keys() {
   return 0
 }
 
-# 启用公钥认证（仅修改全局段配置）
+# 确保单个文件中 PubkeyAuthentication 为 yes（用于 Include 文件修复）
+apply_pubkey_enable_to_file() {
+  file="$1"
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+  # 只处理含有 PubkeyAuthentication 指令（含注释关闭）的文件
+  if ! grep -Eiq '^[[:space:]]*#?[[:space:]]*PubkeyAuthentication[[:space:]]+' "$file"; then
+    return 0
+  fi
+  backup_file "$file" >/dev/null
+  set_sshd_directive "$file" "PubkeyAuthentication" "yes"
+  log "已更新 $file 中的 PubkeyAuthentication 为 yes"
+}
+
+# 处理所有 Include 引入的文件，确保 PubkeyAuthentication yes
+process_included_configs_for_pubkey() {
+  cfg_file="$1"
+
+  # 处理 sshd_config.d/ 标准目录
+  config_dir="/etc/ssh/sshd_config.d"
+  if [ -d "$config_dir" ]; then
+    for file in "$config_dir"/*.conf; do
+      if [ -f "$file" ]; then
+        apply_pubkey_enable_to_file "$file"
+      fi
+    done
+  fi
+
+  # 处理主配置中 Include 指令引用的其他文件
+  awk '
+    BEGIN { IGNORECASE = 1 }
+    /^[[:space:]]*#/ { next }
+    tolower($1) == "include" {
+      for (i = 2; i <= NF; i++) { print $i }
+    }
+  ' "$cfg_file" | while IFS= read -r include_pattern; do
+    [ -z "$include_pattern" ] && continue
+    case "$include_pattern" in
+      /*) abs_pattern="$include_pattern" ;;
+      *)  abs_pattern="/etc/ssh/$include_pattern" ;;
+    esac
+    for included_file in $abs_pattern; do
+      if [ -f "$included_file" ] && [ "$included_file" != "$cfg_file" ]; then
+        apply_pubkey_enable_to_file "$included_file"
+      fi
+    done
+  done
+}
+
+# 启用公钥认证
 enable_pubkey_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
+  # 先修复所有 Include 文件（Include 在主配置顶部时优先级更高）
+  process_included_configs_for_pubkey "$cfg_file"
+  # 再写主配置全局段
   set_global_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
   set_global_sshd_directive "$cfg_file" "AuthorizedKeysFile" ".ssh/authorized_keys .ssh/authorized_keys2"
   log "已启用 PubkeyAuthentication"
@@ -533,6 +586,26 @@ ensure_sshd_port_override_file() {
 Port $port
 EOF
   mv "$tmp" "$cfg_sshd_port_override"
+
+  # 将主配置及其他 include 文件中的 Port 指令注释掉，避免多端口累加
+  # （OpenSSH 的 Port 是累加而非覆盖，必须只保留一个来源）
+  _remove_port_from_file() {
+    _file="$1"
+    if [ ! -f "$_file" ]; then return 0; fi
+    # 跳过我们自己管理的 override 文件
+    [ "$_file" = "$cfg_sshd_port_override" ] && return 0
+    if grep -Eq '^[[:space:]]*Port[[:space:]]+[0-9]+' "$_file" 2>/dev/null; then
+      backup_file "$_file" >/dev/null
+      sed -i 's/^[[:space:]]*Port[[:space:]]\+[0-9]\+/# & (commented by ssh-manager, see sshd_config.d\/99-ssh-manager-port.conf)/' "$_file"
+      log "已注释 $_file 中的 Port 指令（由 override 文件统一管理）"
+    fi
+  }
+
+  _remove_port_from_file "$cfg_sshd_config_path"
+
+  for _f in "$config_dir"/*.conf; do
+    [ -f "$_f" ] && _remove_port_from_file "$_f"
+  done
 }
 
 verify_ssh_port_effective() {
@@ -967,7 +1040,11 @@ disable_password_authentication() {
   cfg_file="$1"
   backup_file "$cfg_file" >/dev/null
   
-  # 先写全局指令，确保默认路径生效
+  # 先修复所有 Include 文件中的 PubkeyAuthentication（Include 位于顶部时优先级更高）
+  process_included_configs_for_pubkey "$cfg_file"
+
+  # 再写主配置全局指令
+  set_global_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
@@ -975,6 +1052,7 @@ disable_password_authentication() {
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
 
   # 再覆盖主配置中所有上下文（含 Match）里的同名指令，避免局部放开
+  # 注意：PubkeyAuthentication 仅在全局段设置，不覆盖 Match 块（避免误关闭）
   set_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
