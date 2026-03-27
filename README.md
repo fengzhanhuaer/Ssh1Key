@@ -6,6 +6,7 @@
 
 - ✅ 从 GitHub 拉取并安装公钥，启用公钥登录
 - ✅ 修改 SSH 端口
+- ✅ 按系统环境细化端口变更（处理 socket 激活、SELinux、常见防火墙）
 - ✅ 禁用/启用密码登录（智能检测公钥登录状态，避免锁定）
 - ✅ 安装本地公钥到指定用户
 - ✅ 自动安装并配置 fail2ban 以增强安全性
@@ -67,8 +68,8 @@ wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ss
 
 | 命令 | 参数 | 描述 |
 |------|------|------|
-| `1` | `<github-user> [home]` | 从 GitHub 拉取并安装公钥（可选指定目标主目录，默认 /root），并启用公钥登录 |
-| `3` | `[home]` | 禁用密码登录（仅在检测到公钥认证或目标用户已有公钥时执行） |
+| `1` | `<github-user> [home]` | 从 GitHub 拉取并安装公钥（可选指定目标主目录，默认当前登录用户主目录），并启用公钥登录 |
+| `3` | `[home]` | 禁用密码登录（默认当前登录用户主目录；仅在检测到公钥认证或目标用户已有公钥时执行） |
 | `4` | 无 | 安装（如需）并部署 fail2ban sshd jail |
 | `5` | 无 | 启用密码登录（并允许 root 密码登录） |
 | `set-port` | `<port>` | 设置 sshd 端口 |
@@ -81,7 +82,7 @@ wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ss
 
 ### 1. 从 GitHub 拉取并安装公钥
 
-使用默认 GitHub 用户和主目录：
+使用默认 GitHub 用户和主目录（默认当前登录用户的 home）：
 ```bash
 sudo ./manage-ssh.sh 1
 ```
@@ -100,6 +101,11 @@ sudo ./manage-ssh.sh 1 john_doe /home/john
 ```bash
 sudo ./manage-ssh.sh set-port 2222
 ```
+
+说明：脚本会在支持的系统上自动处理以下事项：
+- systemd socket 激活冲突（`ssh.socket`/`sshd.socket`）
+- SELinux 端口上下文（如 RHEL/Fedora 系）
+- 常见防火墙放行（UFW/firewalld）
 
 ### 3. 安装本地公钥
 ```bash
@@ -153,6 +159,7 @@ sudo ./manage-ssh.sh menu
    - Alpine Linux
 5. **网络要求**：从 GitHub 拉取公钥时需要网络连接
 6. **fail2ban**：自动检测包管理器并安装 fail2ban（如果尚未安装）
+7. **Debian 13+ 建议**：优先使用 `ed25519` 公钥；脚本会在仅检测到 `ssh-rsa` 时给出提示
 
 ## 安全建议
 

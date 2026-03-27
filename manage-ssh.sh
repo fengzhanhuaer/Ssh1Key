@@ -8,6 +8,177 @@ cfg_sshd_config_path="/etc/ssh/sshd_config"
 cfg_backup_dir="/var/backups/ssh-manager"
 cfg_fail2ban_jail="/etc/fail2ban/jail.d/ssh-manager.local"
 cfg_sshd_port_override="/etc/ssh/sshd_config.d/99-ssh-manager-port.conf"
+cfg_os_id="unknown"
+cfg_os_like=""
+cfg_os_version_id=""
+cfg_os_major_version=""
+
+read_os_release_value() {
+  key="$1"
+  if [ ! -r /etc/os-release ]; then
+    return 0
+  fi
+
+  awk -v k="$key" '
+    $0 ~ "^[[:space:]]*" k "=" {
+      line = $0
+      sub(/^[^=]*=/, "", line)
+      if (line ~ /^"/) {
+        sub(/^"/, "", line)
+        sub(/"$/, "", line)
+      }
+      print line
+      exit
+    }
+  ' /etc/os-release 2>/dev/null || true
+}
+
+load_os_release_info() {
+  cfg_os_id=$(read_os_release_value "ID")
+  cfg_os_like=$(read_os_release_value "ID_LIKE")
+  cfg_os_version_id=$(read_os_release_value "VERSION_ID")
+
+  if [ -z "$cfg_os_id" ]; then
+    cfg_os_id="unknown"
+  fi
+
+  cfg_os_major_version=$(printf "%s" "$cfg_os_version_id" | awk -F. 'NR==1 {print $1}')
+}
+
+is_debian_family() {
+  case " $cfg_os_id $cfg_os_like " in
+    *" debian "*|*" ubuntu "*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_rhel_family() {
+  case " $cfg_os_id $cfg_os_like " in
+    *" rhel "*|*" centos "*|*" fedora "*|*" rocky "*|*" almalinux "*|*" ol "*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_debian_13_or_newer() {
+  if ! is_debian_family; then
+    return 1
+  fi
+
+  if ! printf "%s" "$cfg_os_major_version" | grep -E '^[0-9]+$' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if [ "$cfg_os_major_version" -ge 13 ] 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
+}
+
+normalize_home_path() {
+  raw_home="$1"
+  if [ -z "$raw_home" ]; then
+    printf ""
+    return 0
+  fi
+
+  normalized_home=$(printf "%s" "$raw_home" | sed 's#/*$##')
+  if [ -z "$normalized_home" ]; then
+    normalized_home="/"
+  fi
+
+  printf "%s" "$normalized_home"
+}
+
+resolve_default_login_user() {
+  if [ -n "${SUDO_USER:-}" ]; then
+    printf "%s" "$SUDO_USER"
+    return 0
+  fi
+  whoami
+}
+
+resolve_user_home_by_name() {
+  user_name="$1"
+
+  if [ -z "$user_name" ]; then
+    return 1
+  fi
+
+  if command -v getent >/dev/null 2>&1; then
+    getent passwd "$user_name" 2>/dev/null | awk -F: 'NR==1 {print $6}'
+    return 0
+  fi
+
+  if [ -f /etc/passwd ]; then
+    awk -F: -v u="$user_name" '$1==u {print $6; exit}' /etc/passwd 2>/dev/null || true
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_user_by_home() {
+  target_home=$(normalize_home_path "$1")
+
+  if [ -z "$target_home" ]; then
+    return 1
+  fi
+
+  if command -v getent >/dev/null 2>&1; then
+    getent passwd 2>/dev/null | awk -F: -v dir="$target_home" '
+      function norm(path) {
+        sub(/\/+$/, "", path)
+        if (path == "") {
+          path = "/"
+        }
+        return path
+      }
+      norm($6) == dir {print $1; exit}
+    '
+    return 0
+  fi
+
+  if [ -f /etc/passwd ]; then
+    awk -F: -v dir="$target_home" '
+      function norm(path) {
+        sub(/\/+$/, "", path)
+        if (path == "") {
+          path = "/"
+        }
+        return path
+      }
+      norm($6) == dir {print $1; exit}
+    ' /etc/passwd 2>/dev/null || true
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_default_target_home() {
+  default_user=$(resolve_default_login_user)
+  resolved_home=$(resolve_user_home_by_name "$default_user" 2>/dev/null || true)
+
+  if [ -n "$resolved_home" ]; then
+    printf "%s" "$(normalize_home_path "$resolved_home")"
+    return 0
+  fi
+
+  if [ "$default_user" = "root" ]; then
+    printf "/root"
+  else
+    printf "/home/%s" "$default_user"
+  fi
+}
 
 tmp_timestamp() {
   date +"%Y%m%dT%H%M%S"
@@ -222,6 +393,57 @@ check_pubkey_enabled_or_keys_exist() {
   return 1
 }
 
+check_pubkey_auth_enabled_for_user() {
+  user="$1"
+
+  if ! command -v sshd >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ -n "$user" ]; then
+    effective_cfg=$(sshd -T -C "user=$user,host=localhost,addr=127.0.0.1" 2>/dev/null || true)
+  else
+    effective_cfg=$(sshd -T 2>/dev/null || true)
+  fi
+
+  if [ -z "$effective_cfg" ]; then
+    return 0
+  fi
+
+  pa=$(printf "%s\n" "$effective_cfg" | awk '$1=="pubkeyauthentication"{print $2; exit}')
+  akf=$(printf "%s\n" "$effective_cfg" | awk '$1=="authorizedkeysfile"{print $2; exit}')
+
+  if [ "$pa" = "yes" ] && [ -n "$akf" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
+verify_pubkey_authentication_enabled() {
+  target_user="$1"
+
+  if ! command -v sshd >/dev/null 2>&1; then
+    log "警告: 未找到 sshd 命令，跳过公钥认证生效校验"
+    return 0
+  fi
+
+  if ! check_pubkey_auth_enabled_for_user ""; then
+    log "警告: 默认上下文下 PubkeyAuthentication 未启用"
+    return 1
+  fi
+
+  if [ -n "$target_user" ]; then
+    if ! check_pubkey_auth_enabled_for_user "$target_user"; then
+      log "警告: 用户 $target_user 上下文下 PubkeyAuthentication 未启用"
+      return 1
+    fi
+  fi
+
+  log "已确认公钥认证在已检查上下文中为启用状态"
+  return 0
+}
+
 # 获取 sshd 实际生效端口（逗号分隔）。优先 sshd -T，其次回退到主配置文件。
 get_effective_sshd_ports() {
   ports=""
@@ -343,6 +565,247 @@ diagnose_socket_activation_port_issue() {
   fi
 }
 
+ensure_selinux_ssh_port_context() {
+  port="$1"
+
+  if [ "$port" = "22" ]; then
+    return 0
+  fi
+
+  if ! command -v getenforce >/dev/null 2>&1; then
+    return 0
+  fi
+
+  selinux_mode=$(getenforce 2>/dev/null || echo "Disabled")
+  case "$selinux_mode" in
+    Disabled|disabled)
+      return 0
+      ;;
+  esac
+
+  selinux_enforcing=0
+  case "$selinux_mode" in
+    Enforcing|enforcing)
+      selinux_enforcing=1
+      ;;
+  esac
+
+  if ! command -v semanage >/dev/null 2>&1; then
+    log "警告: SELinux=$selinux_mode 但未找到 semanage，请手动执行: semanage port -a -t ssh_port_t -p tcp $port"
+    if [ "$selinux_enforcing" -eq 1 ]; then
+      return 1
+    fi
+    return 0
+  fi
+
+  if semanage port -a -t ssh_port_t -p tcp "$port" >/dev/null 2>&1; then
+    log "已为 SELinux 添加 ssh_port_t tcp/$port"
+    return 0
+  fi
+
+  if semanage port -m -t ssh_port_t -p tcp "$port" >/dev/null 2>&1; then
+    log "已为 SELinux 更新 ssh_port_t tcp/$port"
+    return 0
+  fi
+
+  if semanage port -l 2>/dev/null | awk -v p="$port" '
+    $1 == "ssh_port_t" && $2 == "tcp" {
+      ports = ""
+      for (i = 3; i <= NF; i++) {
+        if (ports == "") {
+          ports = $i
+        } else {
+          ports = ports " " $i
+        }
+      }
+
+      gsub(/,/, " ", ports)
+      n = split(ports, arr, /[[:space:]]+/)
+      for (j = 1; j <= n; j++) {
+        token = arr[j]
+        if (token == "") {
+          continue
+        }
+
+        if (index(token, "-") > 0) {
+          split(token, range, "-")
+          if (range[1] ~ /^[0-9]+$/ && range[2] ~ /^[0-9]+$/ && p >= range[1] && p <= range[2]) {
+            found = 1
+          }
+        } else if (token == p) {
+          found = 1
+        }
+      }
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  '; then
+    log "SELinux 已存在 ssh_port_t tcp/$port"
+    return 0
+  fi
+
+  log "警告: 更新 SELinux 端口策略失败，可能导致 sshd 无法监听 $port"
+  if [ "$selinux_enforcing" -eq 1 ]; then
+    return 1
+  fi
+
+  return 0
+}
+
+ensure_port_allowed_by_ufw() {
+  port="$1"
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    return 2
+  fi
+
+  ufw_status=$(ufw status 2>/dev/null | awk 'NR==1 && $1=="Status:" {print tolower($2)}')
+  if [ "$ufw_status" != "active" ]; then
+    return 2
+  fi
+
+  if ufw allow "$port/tcp" >/dev/null 2>&1; then
+    log "已通过 UFW 放行 $port/tcp"
+    return 0
+  fi
+
+  log "警告: UFW 处于 active，但自动放行 $port/tcp 失败，请手动执行: ufw allow $port/tcp"
+  return 1
+}
+
+ensure_port_allowed_by_firewalld() {
+  port="$1"
+
+  if ! command -v firewall-cmd >/dev/null 2>&1; then
+    return 2
+  fi
+
+  if ! firewall-cmd --state >/dev/null 2>&1; then
+    return 2
+  fi
+
+  if firewall-cmd --quiet --query-port="$port/tcp" >/dev/null 2>&1; then
+    log "firewalld 已放行 $port/tcp"
+    return 0
+  fi
+
+  runtime_ok=0
+  permanent_ok=0
+
+  if firewall-cmd --quiet --add-port="$port/tcp" >/dev/null 2>&1; then
+    runtime_ok=1
+  fi
+
+  if firewall-cmd --quiet --permanent --add-port="$port/tcp" >/dev/null 2>&1; then
+    permanent_ok=1
+  fi
+
+  if [ "$runtime_ok" -eq 1 ] || [ "$permanent_ok" -eq 1 ]; then
+    if [ "$permanent_ok" -eq 1 ]; then
+      firewall-cmd --reload >/dev/null 2>&1 || true
+    fi
+    log "已通过 firewalld 放行 $port/tcp"
+    return 0
+  fi
+
+  log "警告: firewalld 处于 running，但自动放行 $port/tcp 失败"
+  return 1
+}
+
+ensure_firewall_port_open() {
+  port="$1"
+
+  if ensure_port_allowed_by_ufw "$port"; then
+    return 0
+  else
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+      return 1
+    fi
+  fi
+
+  if ensure_port_allowed_by_firewalld "$port"; then
+    return 0
+  else
+    rc=$?
+    if [ "$rc" -ne 2 ]; then
+      return 1
+    fi
+  fi
+
+  if is_debian_family || is_rhel_family; then
+    log "提示: 未检测到 active 的 UFW/firewalld；若使用了其他防火墙，请手动放行 tcp/$port"
+  fi
+
+  return 0
+}
+
+is_tcp_port_listening() {
+  port="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn 2>/dev/null | awk -v p="$port" '
+      NR == 1 && $1 == "State" { next }
+      {
+        addr = $4
+        gsub(/\[/, "", addr)
+        gsub(/\]/, "", addr)
+        n = split(addr, parts, ":")
+        local_port = parts[n]
+        if (local_port == p) {
+          found = 1
+        }
+      }
+      END {
+        exit(found ? 0 : 1)
+      }
+    '; then
+      return 0
+    fi
+  fi
+
+  if command -v netstat >/dev/null 2>&1; then
+    if netstat -ltn 2>/dev/null | awk -v p="$port" '
+      NR <= 2 { next }
+      {
+        addr = $4
+        gsub(/\[/, "", addr)
+        gsub(/\]/, "", addr)
+        n = split(addr, parts, ":")
+        local_port = parts[n]
+        if (local_port == p) {
+          found = 1
+        }
+      }
+      END {
+        exit(found ? 0 : 1)
+      }
+    '; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+wait_for_sshd_port_listener() {
+  port="$1"
+  retries=6
+
+  while [ "$retries" -gt 0 ]; do
+    if is_tcp_port_listening "$port"; then
+      log "检测到 sshd 正在监听端口 $port"
+      return 0
+    fi
+    retries=$((retries - 1))
+    sleep 1
+  done
+
+  log "警告: 在预期时间内未检测到 sshd 监听端口 $port"
+  return 1
+}
+
 check_password_auth_disabled_for_user() {
   user="$1"
 
@@ -444,7 +907,7 @@ apply_password_disable_policy_to_file() {
   set_sshd_directive "$file" "PermitRootLogin" "prohibit-password"
   set_sshd_directive "$file" "ChallengeResponseAuthentication" "no"
   set_sshd_directive "$file" "KbdInteractiveAuthentication" "no"
-  set_sshd_directive "$file" "UsePAM" "no"
+  set_sshd_directive "$file" "UsePAM" "yes"
 
   log "已更新 $file 中的密码认证设置"
 }
@@ -508,14 +971,14 @@ disable_password_authentication() {
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
-  set_global_sshd_directive "$cfg_file" "UsePAM" "no"
+  set_global_sshd_directive "$cfg_file" "UsePAM" "yes"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
 
   # 再覆盖主配置中所有上下文（含 Match）里的同名指令，避免局部放开
   set_sshd_directive "$cfg_file" "PasswordAuthentication" "no"
   set_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "no"
   set_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "no"
-  set_sshd_directive "$cfg_file" "UsePAM" "no"
+  set_sshd_directive "$cfg_file" "UsePAM" "yes"
   set_sshd_directive "$cfg_file" "PermitRootLogin" "prohibit-password"
   
   # 处理主配置中 Include 引入的文件（兼容自定义目录）
@@ -538,6 +1001,8 @@ enable_password_authentication() {
 
   set_global_sshd_directive "$cfg_file" "PasswordAuthentication" "yes"
   set_global_sshd_directive "$cfg_file" "ChallengeResponseAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "KbdInteractiveAuthentication" "yes"
+  set_global_sshd_directive "$cfg_file" "UsePAM" "yes"
   set_global_sshd_directive "$cfg_file" "AuthenticationMethods" "any"
   set_global_sshd_directive "$cfg_file" "PermitRootLogin" "yes"
 
@@ -559,7 +1024,7 @@ set_ssh_port() {
 
 install_authorized_key() {
   pubkey_file="$1"
-  user_home="$2"
+  user_home=$(normalize_home_path "$2")
   if [ -z "$user_home" ]; then
     error_exit "目标用户主目录不能为空"
   fi
@@ -575,6 +1040,8 @@ install_authorized_key() {
 
   valid_count=0
   add_count=0
+  rsa_count=0
+  modern_count=0
   while IFS= read -r key_line || [ -n "$key_line" ]; do
     # 去除可能存在的 Windows 回车符 (\r) 和空白字符，防止 sshd 解析出错（特别是没有 comment 的 key）
     key_line=$(printf "%s" "$key_line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -590,6 +1057,17 @@ install_authorized_key() {
     if ! printf "%s" "$key_line" | grep -E '^(ssh-|ecdsa-|sk-|ed25519-)' >/dev/null 2>&1; then
       continue
     fi
+
+    key_type=$(printf "%s" "$key_line" | awk '{print $1}')
+    case "$key_type" in
+      ssh-rsa)
+        rsa_count=$((rsa_count + 1))
+        ;;
+      ssh-ed25519|ecdsa-*|sk-*)
+        modern_count=$((modern_count + 1))
+        ;;
+    esac
+
     valid_count=$((valid_count + 1))
 
     if ! grep -Fqx "$key_line" "$auth_file" >/dev/null 2>&1; then
@@ -608,11 +1086,18 @@ install_authorized_key() {
     log "公钥已存在于 $auth_file"
   fi
 
-  if [ -f /etc/passwd ]; then
-    owner=$(awk -F: -v dir="$user_home" '$6==dir{print $1; exit}' /etc/passwd || true)
-    if [ -n "$owner" ]; then
-      chown "$owner":"$owner" "$ssh_dir" "$auth_file" 2>/dev/null || true
+  if is_debian_13_or_newer && [ "$rsa_count" -gt 0 ] && [ "$modern_count" -eq 0 ]; then
+    log "提示: 当前仅检测到 ssh-rsa 公钥；Debian 13+/新 OpenSSH 建议优先使用 ed25519 公钥。"
+  fi
+
+  owner=$(resolve_user_by_home "$user_home" 2>/dev/null || true)
+  if [ -n "$owner" ]; then
+    owner_group=$(id -gn "$owner" 2>/dev/null || printf "%s" "$owner")
+    if ! chown "$owner":"$owner_group" "$ssh_dir" "$auth_file" 2>/dev/null; then
+      log "警告: 无法自动设置 $ssh_dir 和 $auth_file 的属主，请手动检查。"
     fi
+  else
+    log "警告: 未识别 $user_home 对应的本地用户，已跳过属主修复。"
   fi
 }
 
@@ -737,7 +1222,7 @@ EOF
 
 action_install_github_key() {
   gh_user="$1"
-  user_home="$2"
+  user_home=$(normalize_home_path "$2")
 
   ensure_root
 
@@ -751,6 +1236,11 @@ action_install_github_key() {
   install_authorized_key "$tmp" "$user_home"
   enable_pubkey_authentication "$cfg_sshd_config_path"
   safe_reload_sshd
+
+  target_user=$(resolve_user_by_home "$user_home" 2>/dev/null || true)
+  if ! verify_pubkey_authentication_enabled "$target_user"; then
+    error_exit "公钥认证配置未完全生效，可能被 Match/Include 配置覆盖"
+  fi
 
   trap - EXIT HUP INT TERM
   rm -f "$tmp" 2>/dev/null || true
@@ -778,15 +1268,30 @@ action_set_ssh_port() {
   disable_ssh_socket
   backup_file "$cfg_sshd_config_path" >/dev/null
   set_ssh_port "$cfg_sshd_config_path" "$port"
+
+  if ! ensure_selinux_ssh_port_context "$port"; then
+    error_exit "SELinux 端口策略更新失败，已中止以避免 SSH 端口不可用"
+  fi
+
   safe_reload_sshd
+
   if ! verify_ssh_port_effective "$port"; then
     diagnose_socket_activation_port_issue
     error_exit "SSH 端口修改未生效，请根据提示检查并重试"
   fi
+
+  if ! wait_for_sshd_port_listener "$port"; then
+    diagnose_socket_activation_port_issue
+    error_exit "SSH 端口已写入但未检测到监听，请检查 ssh 服务状态"
+  fi
+
+  if ! ensure_firewall_port_open "$port"; then
+    error_exit "SSH 端口已生效，但自动放行防火墙失败，请按提示处理"
+  fi
 }
 
 action_disable_password_authentication() {
-  user_home="$1"
+  user_home=$(normalize_home_path "$1")
 
   ensure_root
   if ! check_pubkey_enabled_or_keys_exist "$cfg_sshd_config_path" "$user_home"; then
@@ -813,7 +1318,7 @@ action_configure_fail2ban() {
 
 action_install_local_key() {
   pubkey_file="$1"
-  user_home="$2"
+  user_home=$(normalize_home_path "$2")
 
   ensure_root
   install_authorized_key "$pubkey_file" "$user_home"
@@ -821,6 +1326,9 @@ action_install_local_key() {
 
 run_cli_command() {
   cmd="$1"
+  default_login_user=$(resolve_default_login_user)
+  default_user_home=$(resolve_default_target_home)
+
   case "$cmd" in
     help|-h|--help)
       print_usage
@@ -829,8 +1337,8 @@ run_cli_command() {
       interactive_menu
       ;;
     1|install-github-key)
-      gh_user="${2:-${SUDO_USER:-$(whoami)}}"
-      user_home="${3:-/root}"
+      gh_user="${2:-$default_login_user}"
+      user_home="${3:-$default_user_home}"
       action_install_github_key "$gh_user" "$user_home"
       ;;
     2|set-port)
@@ -840,7 +1348,7 @@ run_cli_command() {
       action_set_ssh_port "$2"
       ;;
     3|disable-password)
-      user_home="${2:-/root}"
+      user_home="${2:-$default_user_home}"
       action_disable_password_authentication "$user_home"
       ;;
     4|enable-fail2ban)
@@ -867,8 +1375,8 @@ interactive_menu() {
     error_exit "非交互式环境，请在终端中运行"
   fi
 
-  default_user_home="/root"
-  default_github_user=${SUDO_USER:-$(whoami)}
+  default_user_home=$(resolve_default_target_home)
+  default_github_user=$(resolve_default_login_user)
 
   while :; do
     current_ports=$(get_effective_sshd_ports)
@@ -941,6 +1449,8 @@ EOF
 }
 
 main() {
+  load_os_release_info
+
   if [ "$#" -eq 0 ]; then
     interactive_menu
   else
