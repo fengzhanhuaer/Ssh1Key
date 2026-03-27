@@ -68,7 +68,7 @@ wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ss
 
 | 命令 | 参数 | 描述 |
 |------|------|------|
-| `1` | `<github-user> [home]` | 从 GitHub 拉取并安装公钥（可选指定目标主目录，默认当前登录用户主目录），并启用公钥登录 |
+| `1` | `<github-user> [home]` | 从 GitHub 拉取并安装公钥（默认 GitHub 用户 `fengzhanhuaer`；可选指定目标主目录，默认当前登录用户主目录），并启用公钥登录 |
 | `3` | `[home]` | 禁用密码登录（默认当前登录用户主目录；仅在检测到公钥认证或目标用户已有公钥时执行） |
 | `4` | 无 | 安装（如需）并部署 fail2ban sshd jail |
 | `5` | 无 | 启用密码登录（并允许 root 密码登录） |
@@ -82,7 +82,7 @@ wget -q https://raw.githubusercontent.com/fengzhanhuaer/Ssh1Key/master/manage-ss
 
 ### 1. 从 GitHub 拉取并安装公钥
 
-使用默认 GitHub 用户和主目录（默认当前登录用户的 home）：
+使用默认 GitHub 用户（`fengzhanhuaer`）和主目录（默认当前登录用户的 home）：
 ```bash
 sudo ./manage-ssh.sh 1
 ```

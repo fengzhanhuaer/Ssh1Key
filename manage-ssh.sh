@@ -8,6 +8,7 @@ cfg_sshd_config_path="/etc/ssh/sshd_config"
 cfg_backup_dir="/var/backups/ssh-manager"
 cfg_fail2ban_jail="/etc/fail2ban/jail.d/ssh-manager.local"
 cfg_sshd_port_override="/etc/ssh/sshd_config.d/99-ssh-manager-port.conf"
+cfg_default_github_user="fengzhanhuaer"
 cfg_os_id="unknown"
 cfg_os_like=""
 cfg_os_version_id=""
@@ -104,6 +105,15 @@ resolve_default_login_user() {
     return 0
   fi
   whoami
+}
+
+resolve_default_github_user() {
+  if [ -n "$cfg_default_github_user" ]; then
+    printf "%s" "$cfg_default_github_user"
+    return 0
+  fi
+
+  resolve_default_login_user
 }
 
 resolve_user_home_by_name() {
@@ -1443,7 +1453,7 @@ action_install_local_key() {
 
 run_cli_command() {
   cmd="$1"
-  default_login_user=$(resolve_default_login_user)
+  default_github_user=$(resolve_default_github_user)
   default_user_home=$(resolve_default_target_home)
 
   case "$cmd" in
@@ -1454,7 +1464,7 @@ run_cli_command() {
       interactive_menu
       ;;
     1|install-github-key)
-      gh_user="${2:-$default_login_user}"
+      gh_user="${2:-$default_github_user}"
       user_home="${3:-$default_user_home}"
       action_install_github_key "$gh_user" "$user_home"
       ;;
@@ -1493,7 +1503,7 @@ interactive_menu() {
   fi
 
   default_user_home=$(resolve_default_target_home)
-  default_github_user=$(resolve_default_login_user)
+  default_github_user=$(resolve_default_github_user)
 
   while :; do
     current_ports=$(get_effective_sshd_ports)
