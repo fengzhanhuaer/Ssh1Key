@@ -439,6 +439,8 @@ enable_pubkey_authentication() {
   process_included_configs_for_pubkey "$cfg_file"
   # 再写主配置全局段
   set_global_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
+  # 覆盖主配置中所有上下文（含 Match），避免用户级规则将其关闭
+  set_sshd_directive "$cfg_file" "PubkeyAuthentication" "yes"
   set_global_sshd_directive "$cfg_file" "AuthorizedKeysFile" ".ssh/authorized_keys .ssh/authorized_keys2"
   log "已启用 PubkeyAuthentication"
 }
@@ -544,6 +546,102 @@ verify_pubkey_authentication_enabled() {
 
   log "已确认公钥认证在默认上下文中为启用状态"
   return 0
+}
+
+print_pubkey_directives_from_file() {
+  file="$1"
+
+  if [ ! -f "$file" ]; then
+    return 0
+  fi
+
+  log "检查文件: $file"
+  awk '
+    BEGIN { IGNORECASE = 1 }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      if (line ~ /^#/ || line == "") {
+        next
+      }
+
+      if (tolower($1) == "match") {
+        printf "  [行 %d] %s\n", NR, $0
+        next
+      }
+
+      key = tolower($1)
+      if (key == "pubkeyauthentication" || key == "authorizedkeysfile" || key == "passwordauthentication" || key == "kbdinteractiveauthentication" || key == "challengeresponseauthentication" || key == "include") {
+        printf "  [行 %d] %s\n", NR, $0
+      }
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+diagnose_pubkey_authentication_failure() {
+  target_user="$1"
+  cfg_file="$2"
+
+  log "开始自动诊断公钥认证未生效原因..."
+
+  if command -v sshd >/dev/null 2>&1; then
+    default_view=$(sshd -T 2>/dev/null || true)
+    if [ -n "$default_view" ]; then
+      log "sshd -T（默认上下文）关键项:"
+      printf "%s\n" "$default_view" | awk '
+        $1=="pubkeyauthentication" || $1=="authorizedkeysfile" || $1=="passwordauthentication" || $1=="kbdinteractiveauthentication" || $1=="challengeresponseauthentication" {print "  " $0}
+      '
+    else
+      log "警告: 无法获取 sshd -T 默认上下文输出"
+    fi
+
+    if [ -n "$target_user" ]; then
+      user_view=$(sshd -T -C "user=$target_user,host=localhost,addr=127.0.0.1" 2>/dev/null || true)
+      if [ -n "$user_view" ]; then
+        log "sshd -T（用户 $target_user 上下文）关键项:"
+        printf "%s\n" "$user_view" | awk '
+          $1=="pubkeyauthentication" || $1=="authorizedkeysfile" || $1=="passwordauthentication" || $1=="kbdinteractiveauthentication" || $1=="challengeresponseauthentication" {print "  " $0}
+        '
+      else
+        log "警告: 无法获取用户 $target_user 的 sshd -T 输出"
+      fi
+    fi
+  else
+    log "警告: 未找到 sshd 命令，跳过 sshd -T 诊断"
+  fi
+
+  print_pubkey_directives_from_file "$cfg_file"
+
+  if [ -f "$cfg_file" ]; then
+    awk '
+      BEGIN { IGNORECASE = 1 }
+      /^[[:space:]]*#/ { next }
+      tolower($1) == "include" {
+        for (i = 2; i <= NF; i++) {
+          print $i
+        }
+      }
+    ' "$cfg_file" | while IFS= read -r include_pattern; do
+      [ -z "$include_pattern" ] && continue
+
+      case "$include_pattern" in
+        /*)
+          abs_pattern="$include_pattern"
+          ;;
+        *)
+          abs_pattern="/etc/ssh/$include_pattern"
+          ;;
+      esac
+
+      for included_file in $abs_pattern; do
+        if [ -f "$included_file" ] && [ "$included_file" != "$cfg_file" ]; then
+          print_pubkey_directives_from_file "$included_file"
+        fi
+      done
+    done
+  fi
+
+  log "诊断结束：请重点检查 Match 块及 Include 文件中是否仍有 PubkeyAuthentication no"
 }
 
 # 获取 sshd 实际生效端口（逗号分隔）。优先 sshd -T，其次回退到主配置文件。
@@ -1366,6 +1464,7 @@ action_install_github_key() {
 
   target_user=$(resolve_user_by_home "$user_home" 2>/dev/null || true)
   if ! verify_pubkey_authentication_enabled "$target_user"; then
+    diagnose_pubkey_authentication_failure "$target_user" "$cfg_sshd_config_path"
     error_exit "公钥认证配置未完全生效，可能被 Match/Include 配置覆盖"
   fi
 
